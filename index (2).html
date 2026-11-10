@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>티볼 비디오 판독</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/peerjs/1.5.4/peerjs.min.js"></script>
+<style>
+*{box-sizing:border-box}
+body{margin:0;background:#101418;color:#f2f5f7;font-family:system-ui,-apple-system,"Noto Sans KR",sans-serif;font-size:18px}
+.screen{min-height:100vh;padding:20px}
+h1{margin:0 0 6px;font-size:28px}
+.sub{color:#9aa7b2;margin:0 0 24px}
+button{font:inherit;border:0;border-radius:14px;padding:16px 22px;background:#2b3640;color:#fff;cursor:pointer}
+button.main{background:#1f8f4e}
+button.red{background:#c0392b}
+button.on{background:#2e7dd7}
+.row{display:flex;gap:12px;flex-wrap:wrap;margin:14px 0}
+input{font:inherit;font-size:28px;letter-spacing:6px;text-align:center;width:180px;padding:12px;border-radius:12px;border:2px solid #3a4651;background:#171d23;color:#fff}
+.code{font-size:56px;font-weight:800;letter-spacing:10px;color:#ffd54a}
+.msg{color:#9aa7b2;margin:8px 0}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:14px}
+.tile{background:#171d23;border-radius:16px;padding:10px}
+.tile video{width:100%;aspect-ratio:16/9;background:#000;border-radius:10px;object-fit:cover}
+.tile .top{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;font-weight:700}
+.dot{display:inline-block;width:12px;height:12px;border-radius:50%;background:#666;margin-right:8px}
+.dot.ok{background:#2ecc71}
+.tile button{width:100%;margin-top:8px}
+#camVideo{width:100%;max-height:60vh;background:#000;border-radius:14px}
+.bigbase{font-size:64px;font-weight:800}
+#modal{position:fixed;inset:0;background:rgba(0,0,0,.92);padding:16px;display:none;flex-direction:column;gap:12px;z-index:10}
+#modal video{width:100%;flex:1;min-height:0;background:#000;border-radius:12px}
+</style>
+</head>
+<body>
+
+<div id="home" class="screen">
+  <h1>⚾ 티볼 비디오 판독</h1>
+  <p class="sub">이 패드의 역할을 골라 주세요</p>
+  <div class="row">
+    <button class="main" onclick="startUmpire()">🧑‍⚖️ 심판 패드 (중앙)</button>
+    <button class="on" onclick="show('camSetup')">📷 촬영 패드 (베이스)</button>
+  </div>
+</div>
+
+<div id="camSetup" class="screen" hidden>
+  <h1>📷 촬영 패드 설정</h1>
+  <p class="sub">1) 베이스 선택 → 2) 심판 패드의 4자리 코드 입력</p>
+  <div class="row" id="baseBtns"></div>
+  <div class="row"><input id="codeIn" inputmode="numeric" maxlength="4" placeholder="0000"></div>
+  <div class="row">
+    <button class="main" onclick="startCamera()">연결하고 촬영 시작</button>
+    <button onclick="show('home')">← 뒤로</button>
+  </div>
+  <p class="msg" id="setupMsg"></p>
+</div>
+
+<div id="camera" class="screen" hidden>
+  <div class="bigbase" id="camBase"></div>
+  <p class="msg" id="camMsg">연결 중…</p>
+  <video id="camVideo" autoplay muted playsinline></video>
+  <p class="msg">화면을 켠 채로 베이스가 잘 보이게 세워 두세요. 최근 10초 영상이 자동으로 저장됩니다.</p>
+</div>
+
+<div id="umpire" class="screen" hidden>
+  <h1>🧑‍⚖️ 심판 패드</h1>
+  <div>경기 코드 (촬영 패드에 입력)</div>
+  <div class="code" id="codeShow">----</div>
+  <p class="msg" id="umpMsg">연결 대기 중…</p>
+  <div class="grid" id="tiles"></div>
+</div>
+
+<div id="modal">
+  <div id="modalTitle" style="font-size:22px;font-weight:700"></div>
+  <video id="replayVideo" playsinline controls></video>
+  <div class="row" style="margin:0">
+    <button onclick="setRate(0.25)" id="r25">0.25배</button>
+    <button onclick="setRate(0.5)" id="r50" class="on">0.5배</button>
+    <button onclick="setRate(1)" id="r100">1배</button>
+    <button onclick="replayAgain()">🔁 처음부터</button>
+    <button class="red" onclick="closeModal()">닫기</button>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const BASES = {'1':'1루','2':'2루','3':'3루','H':'홈'};
+let peer, selBase = null;
+
+function show(id){
+  document.querySelectorAll('.screen').forEach(s => s.hidden = (s.id !== id));
+}
+
+// 베이스 선택 버튼
+Object.keys(BASES).forEach(k => {
+  const b = document.createElement('button');
+  b.textContent = BASES[k];
+  b.onclick = () => {
+    selBase = k;
+    document.querySelectorAll('#baseBtns button').forEach(x => x.classList.remove('on'));
+    b.classList.add('on');
+  };
+  $('baseBtns').appendChild(b);
+});
+
+/* ================= 심판 패드 ================= */
+const conns = {};
+let playlist = [], plIndex = 0, rate = 0.5;
+
+function startUmpire(){
+  const code = String(Math.floor(1000 + Math.random() * 9000));
+  show('umpire');
+  $('codeShow').textContent = code;
+
+  Object.keys(BASES).forEach(k => {
+    const d = document.createElement('div');
+    d.className = 'tile';
+    d.innerHTML =
+      '<div class="top"><span><span class="dot" id="dot'+k+'"></span>'+BASES[k]+'</span></div>' +
+      '<video id="v'+k+'" autoplay muted playsinline></video>' +
+      '<button class="main" onclick="askReplay(\''+k+'\')">🎬 '+BASES[k]+' 판독</button>';
+    $('tiles').appendChild(d);
+  });
+
+  peer = new Peer('tball-' + code + '-umpire');
+  peer.on('open', () => $('umpMsg').textContent = '촬영 패드 연결을 기다리는 중…');
+  peer.on('error', e => $('umpMsg').textContent = '오류: ' + e.type + ' (페이지를 새로고침 해 주세요)');
+  peer.on('connection', conn => {
+    const b = conn.peer.split('-')[2];
+    conns[b] = conn;
+    $('dot'+b).classList.add('ok');
+    $('umpMsg').textContent = BASES[b] + ' 연결됨';
+    conn.on('data', d => {
+      if (d && d.type === 'replay') openReplay(b, d.clips, d.mime);
+    });
+    conn.on('close', () => {
+      $('dot'+b).classList.remove('ok');
+      $('umpMsg').textContent = BASES[b] + ' 연결이 끊김';
+    });
+  });
+  peer.on('call', call => {
+    const b = call.peer.split('-')[2];
+    call.answer();
+    call.on('stream', s => {
+      const v = $('v'+b);
+      v.srcObject = s;
+      v.play().catch(()=>{});
+    });
+  });
+}
+
+function askReplay(b){
+  const c = conns[b];
+  if (!c || !c.open){ $('umpMsg').textContent = BASES[b] + ' 패드가 연결되어 있지 않아요'; return; }
+  $('umpMsg').textContent = BASES[b] + ' 영상 받는 중…';
+  c.send({type:'replay-request'});
+}
+
+function openReplay(b, clips, mime){
+  playlist.forEach(u => URL.revokeObjectURL(u));
+  playlist = clips.map(buf => URL.createObjectURL(new Blob([buf], {type: mime || 'video/webm'})));
+  plIndex = 0;
+  $('umpMsg').textContent = BASES[b] + ' 영상 도착';
+  $('modalTitle').textContent = BASES[b] + ' 판독 (최근 영상)';
+  $('modal').style.display = 'flex';
+  const v = $('replayVideo');
+  v.onended = () => {
+    plIndex++;
+    if (plIndex >= playlist.length) return;
+    playClip();
+  };
+  playClip();
+}
+function playClip(){
+  const v = $('replayVideo');
+  v.src = playlist[plIndex];
+  v.defaultPlaybackRate = rate;
+  v.playbackRate = rate;
+  v.play().catch(()=>{});
+  v.onloadedmetadata = () => { v.playbackRate = rate; };
+}
+function setRate(r){
+  rate = r;
+  const v = $('replayVideo');
+  v.defaultPlaybackRate = r;
+  v.playbackRate = r;
+  ['25','50','100'].forEach(x => $('r'+x).classList.remove('on'));
+  $(r === 0.25 ? 'r25' : r === 0.5 ? 'r50' : 'r100').classList.add('on');
+}
+function replayAgain(){ plIndex = 0; playClip(); }
+function closeModal(){
+  $('replayVideo').pause();
+  $('modal').style.display = 'none';
+}
+
+/* ================= 촬영 패드 ================= */
+let stream, conn, rec, segTimer, segChunks = [], segs = [], pending = false, mimeType = '', retryT = null, umpId = '';
+const SEG_MS = 5000;
+
+async function startCamera(){
+  const code = $('codeIn').value.trim();
+  if (!selBase){ $('setupMsg').textContent = '베이스를 먼저 골라 주세요'; return; }
+  if (!/^\d{4}$/.test(code)){ $('setupMsg').textContent = '4자리 숫자 코드를 입력해 주세요'; return; }
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: {facingMode:'environment', width:{ideal:1280}, height:{ideal:720}, frameRate:{ideal:30}},
+      audio: false
+    });
+  } catch(e){
+    $('setupMsg').textContent = '카메라를 켤 수 없어요. 카메라 권한을 허용해 주세요.';
+    return;
+  }
+  show('camera');
+  $('camBase').textContent = BASES[selBase];
+  $('camVideo').srcObject = stream;
+  try { await navigator.wakeLock.request('screen'); } catch(e){}
+
+  mimeType = ['video/webm;codecs=vp8','video/webm','video/mp4'].find(t => window.MediaRecorder && MediaRecorder.isTypeSupported(t)) || '';
+  umpId = 'tball-' + code + '-umpire';
+
+  peer = new Peer('tball-' + code + '-' + selBase);
+  peer.on('open', connectToUmpire);
+  peer.on('error', e => {
+    if (e.type === 'peer-unavailable'){
+      $('camMsg').textContent = '심판 패드를 못 찾았어요. 코드를 확인하세요. 다시 시도 중…';
+      scheduleRetry();
+    } else if (e.type === 'unavailable-id'){
+      $('camMsg').textContent = '이 베이스는 이미 다른 패드가 쓰고 있어요. 페이지를 새로고침 해 주세요.';
+    } else {
+      $('camMsg').textContent = '오류: ' + e.type;
+    }
+  });
+  startSeg();
+}
+
+function scheduleRetry(){
+  clearTimeout(retryT);
+  retryT = setTimeout(connectToUmpire, 3000);
+}
+
+function connectToUmpire(){
+  conn = peer.connect(umpId, {reliable:true});
+  conn.on('open', () => {
+    $('camMsg').textContent = '연결됨 ✅ 촬영 중';
+    peer.call(umpId, stream);
+  });
+  conn.on('data', d => { if (d && d.type === 'replay-request') requestReplay(); });
+  conn.on('close', () => {
+    $('camMsg').textContent = '연결이 끊김. 다시 연결 중…';
+    scheduleRetry();
+  });
+}
+
+// 5초씩 끊어 녹화, 최근 조각만 보관
+function startSeg(){
+  segChunks = [];
+  try {
+    rec = new MediaRecorder(stream, mimeType ? {mimeType, videoBitsPerSecond:1500000} : {videoBitsPerSecond:1500000});
+  } catch(e){
+    $('camMsg').textContent = '이 기기는 녹화를 지원하지 않아요';
+    return;
+  }
+  rec.ondataavailable = e => { if (e.data && e.data.size) segChunks.push(e.data); };
+  rec.onstop = () => {
+    const blob = new Blob(segChunks, {type: rec.mimeType || mimeType || 'video/webm'});
+    if (blob.size > 0) segs.push(blob);
+    if (segs.length > 4) segs.shift();
+    if (pending){ pending = false; sendReplay(); }
+    startSeg();
+  };
+  rec.start();
+  segTimer = setTimeout(() => { if (rec.state === 'recording') rec.stop(); }, SEG_MS);
+}
+
+function requestReplay(){
+  pending = true;
+  clearTimeout(segTimer);
+  if (rec && rec.state === 'recording') rec.stop();
+}
+
+async function sendReplay(){
+  const last = segs.slice(-3);
+  const clips = await Promise.all(last.map(b => b.arrayBuffer()));
+  if (conn && conn.open) conn.send({type:'replay', clips, mime: mimeType});
+}
+</script>
+</body>
+</html>
